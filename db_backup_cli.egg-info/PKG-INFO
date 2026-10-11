@@ -1,0 +1,116 @@
+Metadata-Version: 2.4
+Name: db-backup-cli
+Version: 0.1.0
+Summary: A database backup and restore CLI with pluggable DBMS adapters
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"
+
+# DB Backup CLI
+
+A small, cross-platform Python CLI for database backup and restore. It demonstrates a production-friendly architecture without hiding the important pieces: each DBMS owns its backup semantics, storage is separate from backup creation, and every operation is logged.
+
+## What is implemented
+
+- SQLite full backup and restore using Python's online backup API.
+- MySQL, PostgreSQL, and MongoDB adapters using official tools (`mysqldump`, `pg_dump`, `mongodump`, and their restore tools).
+- Full, incremental, and differential options are exposed; adapters reject types they cannot safely implement yet.
+- Gzip compression, local storage, and cloud upload hooks for AWS S3, Google Cloud Storage, and Azure through their CLIs.
+- JSON-lines activity logs with timing and error status.
+- Optional Slack completion notification.
+- A simple in-process scheduler.
+
+This is intentionally a foundation, not a claim that all database engines share one backup algorithm. Incremental and differential support must be implemented per DBMS because engines expose different WAL, binlog, oplog, snapshot, and checkpoint mechanisms.
+
+## Setup
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+py -m pip install -e ".[dev]"
+```
+
+Run the tests:
+
+```powershell
+py -m pytest
+```
+
+Show help:
+
+```powershell
+db-backup --help
+db-backup backup --help
+```
+
+## First working example: SQLite
+
+Create a database:
+
+```powershell
+py -c "import sqlite3; c=sqlite3.connect('app.db'); c.execute('create table if not exists users(id integer primary key, name text)'); c.execute(\"insert into users(name) values ('Ada')\"); c.commit(); c.close()"
+```
+
+Back it up locally with gzip compression and a JSON log:
+
+```powershell
+db-backup backup --type sqlite --database app.db --destination backups --log-file backup.log
+```
+
+Restore it to another SQLite file:
+
+```powershell
+db-backup restore --type sqlite --database restored.db --backup-file backups\sqlite_YYYYMMDDT000000Z.backup.gz
+```
+
+The timestamp is generated at runtime; list `backups` to get the exact filename.
+
+## Database clients and credentials
+
+Install and authenticate the vendor client before using an adapter:
+
+- MySQL: `mysqldump` and `mysql`
+- PostgreSQL: `pg_dump`, `pg_restore`, and `pg_isready`
+- MongoDB: `mongodump` and `mongorestore`
+
+Never put passwords in command history. Use an environment variable:
+
+```powershell
+$env:DB_PASSWORD = 'secret'
+db-backup test-connection --type postgres --database app --host localhost --port 5432 --username backup_user --password-env DB_PASSWORD
+```
+
+The adapter passes passwords through client-specific environment variables where supported (`PGPASSWORD`, `MYSQL_PWD`). For production, prefer a secret manager or the vendor's credential file.
+
+PostgreSQL selective restore uses `--table`; MongoDB selective restore uses `--nsInclude`. SQLite and the current MySQL stream format reject `--select` rather than silently restoring the wrong scope.
+
+## Cloud storage
+
+Cloud values are passed to the installed vendor CLI, so configure its credentials using its normal secure mechanism first:
+
+```powershell
+db-backup backup --type sqlite --database app.db --destination my-bucket/backups --cloud s3
+```
+
+The same pattern works with `gcs` and `azure`, but cloud-specific bucket/container authentication and naming should be hardened before production use.
+
+## Scheduling and operations
+
+For a simple foreground schedule:
+
+```powershell
+db-backup schedule --type sqlite --database app.db --destination backups --every-minutes 60
+```
+
+For production, a Windows Task Scheduler job, cron, Kubernetes CronJob, or a managed scheduler is usually more reliable than leaving a foreground process running. Use `db-backup backup ...` as the scheduled command and configure retry, retention, and alerting in that platform.
+
+## How to extend it
+
+1. Add a class implementing `DatabaseAdapter` in `db_backup/adapters.py`.
+2. Implement `test_connection`, `backup`, and `restore` using the DBMS's supported tooling or API.
+3. Register it in `adapter_for` and the CLI `--type` choices.
+4. Add an integration test with a disposable database container or local test instance.
+5. Add retention and checksum verification before treating it as production-ready.
+
+Important production additions include backup encryption, immutable/off-site retention, checksum or restore verification, least-privilege accounts, redacted logs, retry policy, and DBMS-specific incremental backup chains.
